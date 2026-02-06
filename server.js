@@ -15,8 +15,13 @@ const server = http.createServer(app);
 const io = socketIO(server, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"]
-  }
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ['websocket', 'polling'],
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 // Database connection
@@ -195,16 +200,15 @@ const sessionMiddleware = session({
   cookie: {
     maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production'
+    secure: false, // Allow HTTP for Render.com
+    sameSite: 'lax'
   }
 });
 
 app.use(sessionMiddleware);
 
-// Share session with Socket.IO
-io.use((socket, next) => {
-  sessionMiddleware(socket.request, {}, next);
-});
+// Share session with Socket.IO - Improved version
+io.engine.use(sessionMiddleware);
 
 // Helper function to get Baku time
 function getBakuTime() {
@@ -811,21 +815,22 @@ app.post('/api/users/update-profile', async (req, res) => {
 
 // Socket.IO connection
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+  console.log('🔌 User connected:', socket.id);
 
   const session = socket.request.session;
 
-  if (!session.userId) {
-    console.log('Unauthorized socket connection');
-    socket.disconnect();
-    return;
+  if (!session || !session.userId) {
+    console.log('⚠️ Unauthorized socket connection - no session');
+    return; // Don't disconnect immediately, wait for authentication
   }
+  
+  console.log('✅ Authenticated socket for user:', session.userId);
 
   // Join faculty room
   socket.on('join-faculty', async (faculty) => {
     try {
       socket.join(`faculty-${faculty}`);
-      console.log(`User ${session.userId} joined faculty: ${faculty}`);
+      console.log(`👥 User ${session.userId} joined faculty: ${faculty}`);
 
       // Get user info
       const userResult = await pool.query(
@@ -840,33 +845,47 @@ io.on('connection', (socket) => {
         });
       }
     } catch (error) {
-      console.error('Join faculty error:', error);
+      console.error('❌ Join faculty error:', error);
     }
   });
 
   // Leave faculty room
   socket.on('leave-faculty', (faculty) => {
     socket.leave(`faculty-${faculty}`);
-    console.log(`User ${session.userId} left faculty: ${faculty}`);
+    console.log(`👋 User ${session.userId} left faculty: ${faculty}`);
   });
 
   // Send group message
   socket.on('send-group-message', async (data) => {
     try {
       const { faculty, message } = data;
+      
+      console.log('📨 Received group message:', { userId: session.userId, faculty, message: message.substring(0, 50) });
 
       if (!message || !faculty) {
+        console.log('⚠️ Invalid message data');
+        return;
+      }
+
+      // Check if user session is valid
+      if (!session.userId) {
+        console.log('⚠️ No userId in session');
+        socket.emit('error', { message: 'Session expired, please login again' });
         return;
       }
 
       // Filter message
       const filteredMessage = await filterMessage(message);
+      
+      console.log('💾 Saving message to database...');
 
       // Save message
       const result = await pool.query(
         'INSERT INTO group_messages (faculty, user_id, message) VALUES ($1, $2, $3) RETURNING id, created_at',
         [faculty, session.userId, filteredMessage]
       );
+      
+      console.log('✅ Message saved with ID:', result.rows[0].id);
 
       // Get user info
       const userResult = await pool.query(
@@ -887,7 +906,9 @@ io.on('connection', (socket) => {
       };
 
       // Broadcast to faculty room
+      console.log('📡 Broadcasting to faculty:', faculty);
       io.to(`faculty-${faculty}`).emit('new-group-message', messageData);
+      console.log('✅ Message broadcasted successfully');
     } catch (error) {
       console.error('Send group message error:', error);
     }

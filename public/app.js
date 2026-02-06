@@ -481,13 +481,31 @@ function sendMessage() {
     const input = document.getElementById('message-input');
     const message = input.value.trim();
     
-    if (!message || !currentFaculty) return;
+    console.log('📤 Attempting to send message:', { message, faculty: currentFaculty, socketConnected: socket?.connected });
     
+    if (!message) {
+        console.log('⚠️ Empty message');
+        return;
+    }
+    
+    if (!currentFaculty) {
+        console.log('⚠️ No faculty selected');
+        return;
+    }
+    
+    if (!socket || !socket.connected) {
+        console.error('❌ Socket not connected');
+        alert('Connection error. Please refresh the page.');
+        return;
+    }
+    
+    console.log('📡 Emitting send-group-message event...');
     socket.emit('send-group-message', {
         faculty: currentFaculty,
         message: message
     });
     
+    console.log('✅ Message sent to server');
     input.value = '';
 }
 
@@ -505,13 +523,35 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Initialize Socket.IO
 function initializeSocket() {
-    socket = io();
+    socket = io({
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionAttempts: 10
+    });
     
     socket.on('connect', () => {
-        console.log('Connected to server');
+        console.log('✅ Connected to server, Socket ID:', socket.id);
+    });
+    
+    socket.on('connect_error', (error) => {
+        console.error('❌ Socket connection error:', error);
+    });
+    
+    socket.on('disconnect', (reason) => {
+        console.log('⚠️ Disconnected from server:', reason);
+    });
+    
+    socket.on('error', (error) => {
+        console.error('❌ Socket error:', error);
+        if (error.message && error.message.includes('Session expired')) {
+            alert('Session expired. Please login again.');
+            logout();
+        }
     });
     
     socket.on('new-group-message', (msg) => {
+        console.log('📨 Received new group message:', msg);
         if (currentFaculty === msg.faculty) {
             displayGroupMessage(msg);
             scrollToBottom();
@@ -519,19 +559,16 @@ function initializeSocket() {
     });
     
     socket.on('user-joined', (data) => {
-        console.log('User joined:', data.user.full_name);
+        console.log('👥 User joined:', data.user.full_name);
     });
     
     socket.on('new-private-message', (msg) => {
+        console.log('💬 Received new private message:', msg);
         if (currentPrivateChatUser && 
             (msg.sender_id === currentPrivateChatUser.id || msg.receiver_id === currentPrivateChatUser.id)) {
             displayPrivateMessage(msg);
             scrollPrivateChatToBottom();
         }
-    });
-    
-    socket.on('disconnect', () => {
-        console.log('Disconnected from server');
     });
 }
 
