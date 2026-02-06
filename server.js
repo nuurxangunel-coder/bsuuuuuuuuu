@@ -646,32 +646,40 @@ app.get('/api/messages/group/:faculty', async (req, res) => {
     }
 
     const faculty = req.params.faculty;
+    const limit = parseInt(req.query.limit) || 100; // Default 100 messages
 
-    // Get blocked users
+    // Get blocked users (with index)
     const blockedResult = await pool.query(
       'SELECT blocked_id FROM blocked_users WHERE blocker_id = $1',
       [req.session.userId]
     );
     const blockedIds = blockedResult.rows.map(row => row.blocked_id);
 
-    // Get messages
+    // Get messages (optimized with LIMIT and proper index usage)
     let query = `
-      SELECT gm.id, gm.message, gm.created_at, 
-             u.id as user_id, u.full_name, u.faculty, u.degree, u.course, u.avatar
+      SELECT gm.id, gm.message, gm.created_at, gm.faculty,
+             u.id as user_id, u.full_name, u.faculty as user_faculty, u.degree, u.course, u.avatar
       FROM group_messages gm
       JOIN users u ON gm.user_id = u.id
       WHERE gm.faculty = $1
     `;
 
+    const queryParams = [faculty];
+
     if (blockedIds.length > 0) {
-      query += ` AND gm.user_id NOT IN (${blockedIds.join(',')})`;
+      query += ` AND gm.user_id NOT IN (${blockedIds.map((_, i) => `$${i + 2}`).join(',')})`;
+      queryParams.push(...blockedIds);
     }
 
-    query += ' ORDER BY gm.created_at ASC';
+    query += ` ORDER BY gm.created_at DESC LIMIT $${queryParams.length + 1}`;
+    queryParams.push(limit);
 
-    const result = await pool.query(query, [faculty]);
+    const result = await pool.query(query, queryParams);
+    
+    // Reverse to show oldest first
+    const messages = result.rows.reverse();
 
-    res.json({ success: true, messages: result.rows });
+    res.json({ success: true, messages });
   } catch (error) {
     console.error('Get group messages error:', error);
     res.status(500).json({ success: false, message: 'Xəta baş verdi' });
@@ -899,14 +907,14 @@ io.on('connection', (socket) => {
         created_at: result.rows[0].created_at,
         user_id: session.userId,
         full_name: userResult.rows[0].full_name,
-        faculty: userResult.rows[0].faculty,
+        faculty: faculty, // IMPORTANT: Include faculty in message data
         degree: userResult.rows[0].degree,
         course: userResult.rows[0].course,
         avatar: userResult.rows[0].avatar
       };
 
-      // Broadcast to faculty room
-      console.log('📡 Broadcasting to faculty:', faculty);
+      // Broadcast ONLY to this specific faculty room
+      console.log('📡 Broadcasting to faculty room:', `faculty-${faculty}`);
       io.to(`faculty-${faculty}`).emit('new-group-message', messageData);
       console.log('✅ Message broadcasted successfully');
     } catch (error) {

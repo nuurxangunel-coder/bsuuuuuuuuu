@@ -393,7 +393,11 @@ function loadFaculties() {
 
 // Select faculty
 function selectFaculty(faculty) {
-    if (currentFaculty) {
+    console.log('🏫 Selecting faculty:', faculty);
+    
+    // Leave previous faculty
+    if (currentFaculty && currentFaculty !== faculty) {
+        console.log('👋 Leaving previous faculty:', currentFaculty);
         socket.emit('leave-faculty', currentFaculty);
     }
     
@@ -411,38 +415,56 @@ function selectFaculty(faculty) {
     document.querySelector('.no-faculty-selected').style.display = 'none';
     document.getElementById('message-input-container').style.display = 'flex';
     
-    // Join faculty room
+    // Clear previous messages IMMEDIATELY
+    const container = document.getElementById('messages-container');
+    container.innerHTML = '<div style="text-align: center; padding: 20px; color: #999;">Yüklənir...</div>';
+    
+    // Join new faculty room
+    console.log('📥 Joining faculty:', faculty);
     socket.emit('join-faculty', faculty);
     
-    // Load messages
+    // Load messages for this faculty
     loadGroupMessages(faculty);
 }
 
-// Load group messages
+// Load group messages with caching
+const messageCache = {};
+
 async function loadGroupMessages(faculty) {
     try {
-        const response = await fetch(`/api/messages/group/${encodeURIComponent(faculty)}`);
+        console.log('📨 Loading messages for faculty:', faculty);
+        
+        const response = await fetch(`/api/messages/group/${encodeURIComponent(faculty)}?limit=100`);
         const data = await response.json();
         
         if (data.success) {
             const container = document.getElementById('messages-container');
-            container.innerHTML = '';
+            container.innerHTML = ''; // Clear loading message
             
+            // Cache messages
+            messageCache[faculty] = data.messages;
+            
+            console.log(`✅ Loaded ${data.messages.length} messages for ${faculty}`);
+            
+            // Optimized batch rendering with DocumentFragment
+            const fragment = document.createDocumentFragment();
             data.messages.forEach(msg => {
-                displayGroupMessage(msg);
+                const messageElement = createMessageElement(msg);
+                fragment.appendChild(messageElement);
             });
+            container.appendChild(fragment);
             
             scrollToBottom();
         }
     } catch (error) {
-        console.error('Load group messages error:', error);
+        console.error('❌ Load group messages error:', error);
+        const container = document.getElementById('messages-container');
+        container.innerHTML = '<div style="text-align: center; padding: 20px; color: #f00;">Xəta baş verdi</div>';
     }
 }
 
-// Display group message
-function displayGroupMessage(msg) {
-    const container = document.getElementById('messages-container');
-    
+// Create message element (optimized)
+function createMessageElement(msg) {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message';
     messageDiv.dataset.messageId = msg.id;
@@ -450,15 +472,16 @@ function displayGroupMessage(msg) {
     
     const avatarSrc = `/avatars/${msg.avatar === 1 ? 'boy' : 'girl'}.png`;
     const time = formatTime(msg.created_at);
+    const facultyName = msg.faculty || msg.user_faculty || '';
     
     messageDiv.innerHTML = `
         <div class="message-avatar">
-            <img src="${avatarSrc}" alt="Avatar">
+            <img src="${avatarSrc}" alt="Avatar" loading="lazy">
         </div>
         <div class="message-content">
             <div class="message-header">
-                <span class="message-author">${msg.full_name}</span>
-                <span class="message-info">${msg.faculty} • ${msg.degree} • ${msg.course}-ci kurs</span>
+                <span class="message-author">${escapeHtml(msg.full_name)}</span>
+                <span class="message-info">${escapeHtml(facultyName)} • ${escapeHtml(msg.degree)} • ${msg.course}-ci kurs</span>
             </div>
             <div class="message-text">${escapeHtml(msg.message)}</div>
             <div class="message-time">${time}</div>
@@ -473,7 +496,14 @@ function displayGroupMessage(msg) {
         ` : ''}
     `;
     
-    container.appendChild(messageDiv);
+    return messageDiv;
+}
+
+// Display group message (for real-time messages)
+function displayGroupMessage(msg) {
+    const container = document.getElementById('messages-container');
+    const messageElement = createMessageElement(msg);
+    container.appendChild(messageElement);
 }
 
 // Send message
@@ -526,20 +556,41 @@ function initializeSocket() {
     socket = io({
         transports: ['websocket', 'polling'],
         reconnection: true,
-        reconnectionDelay: 1000,
-        reconnectionAttempts: 10
+        reconnectionDelay: 500,
+        reconnectionDelayMax: 5000,
+        reconnectionAttempts: 10,
+        timeout: 10000
     });
     
     socket.on('connect', () => {
         console.log('✅ Connected to server, Socket ID:', socket.id);
+        
+        // Rejoin current faculty if exists
+        if (currentFaculty) {
+            console.log('🔄 Rejoining faculty:', currentFaculty);
+            socket.emit('join-faculty', currentFaculty);
+        }
     });
     
     socket.on('connect_error', (error) => {
-        console.error('❌ Socket connection error:', error);
+        console.error('❌ Socket connection error:', error.message);
+    });
+    
+    socket.on('reconnect', (attemptNumber) => {
+        console.log('🔄 Reconnected after', attemptNumber, 'attempts');
+        
+        // Reload messages after reconnection
+        if (currentFaculty) {
+            loadGroupMessages(currentFaculty);
+        }
     });
     
     socket.on('disconnect', (reason) => {
         console.log('⚠️ Disconnected from server:', reason);
+        if (reason === 'io server disconnect') {
+            // Server disconnected - try to reconnect manually
+            socket.connect();
+        }
     });
     
     socket.on('error', (error) => {
@@ -552,9 +603,17 @@ function initializeSocket() {
     
     socket.on('new-group-message', (msg) => {
         console.log('📨 Received new group message:', msg);
-        if (currentFaculty === msg.faculty) {
+        
+        // CRITICAL: Only display if this message is for current faculty
+        if (msg.faculty && currentFaculty && msg.faculty === currentFaculty) {
+            console.log('✅ Message is for current faculty, displaying...');
             displayGroupMessage(msg);
             scrollToBottom();
+        } else {
+            console.log('⚠️ Message is for different faculty, ignoring', {
+                messageFaculty: msg.faculty,
+                currentFaculty: currentFaculty
+            });
         }
     });
     
@@ -890,18 +949,23 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// Optimized scroll with debounce
+let scrollTimeout;
 function scrollToBottom() {
-    const container = document.getElementById('messages-container');
-    setTimeout(() => {
-        container.scrollTop = container.scrollHeight;
-    }, 100);
+    if (scrollTimeout) clearTimeout(scrollTimeout);
+    scrollTimeout = setTimeout(() => {
+        const container = document.getElementById('messages-container');
+        if (container) {
+            container.scrollTop = container.scrollHeight;
+        }
+    }, 50);
 }
 
 function scrollPrivateChatToBottom() {
     const container = document.getElementById('private-messages-container');
-    setTimeout(() => {
+    if (container) {
         container.scrollTop = container.scrollHeight;
-    }, 100);
+    }
 }
 
 // Admin Page Functions

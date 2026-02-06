@@ -544,12 +544,21 @@ body {
 @keyframes fadeIn {
     from {
         opacity: 0;
-        transform: translateY(10px);
+        transform: translateY(5px);
     }
     to {
         opacity: 1;
         transform: translateY(0);
     }
+}
+
+/* Performance optimization */
+.message {
+    will-change: auto;
+}
+
+.messages-container {
+    contain: layout style paint;
 }
 
 .message-avatar {
